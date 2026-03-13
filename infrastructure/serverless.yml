@@ -1,0 +1,66 @@
+service: aws-serverless-ecommerce-backend
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: ${opt:region, 'us-east-1'}
+  environment:
+    AWS_REGION: ${self:provider.region}
+    ORDER_PROCESSING_QUEUE_NAME: OrderProcessingQueue
+    ORDER_STATUS_TOPIC_NAME: OrderStatusNotifications
+
+functions:
+  orderCreator:
+    name: OrderCreator
+    handler: src/order_creator_lambda/app.lambda_handler
+    events:
+      - http:
+          path: /orders
+          method: post
+  orderProcessor:
+    name: OrderProcessor
+    handler: src/order_processor_lambda/app.lambda_handler
+    events:
+      - sqs:
+          arn: !GetAtt OrderProcessingQueue.Arn
+          batchSize: 10
+  notificationService:
+    name: NotificationService
+    handler: src/notification_service_lambda/app.lambda_handler
+    events:
+      - sns:
+          arn: !Ref OrderStatusNotifications
+          topicName: OrderStatusNotifications
+
+resources:
+  Resources:
+    OrderProcessingDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: OrderProcessingDLQ
+
+    OrderProcessingQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: OrderProcessingQueue
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt OrderProcessingDLQ.Arn
+          maxReceiveCount: 3
+
+    OrderStatusNotifications:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: OrderStatusNotifications
+
+    # Placeholder subnet and SG configuration; replace with real VPC resources in production.
+    OrdersDatabase:
+      Type: AWS::RDS::DBInstance
+      Properties:
+        Engine: postgres
+        DBInstanceClass: db.t4g.micro
+        AllocatedStorage: "20"
+        PubliclyAccessible: false
+        MasterUsername: orders_user
+        MasterUserPassword: change-me
+        DBName: orders_db
