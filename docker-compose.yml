@@ -1,0 +1,150 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: orders-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-orders_db}
+      POSTGRES_USER: ${DB_USER:-orders_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-orders_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-orders_user} -d ${DB_NAME:-orders_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  localstack:
+    image: localstack/localstack:3.5
+    container_name: orders-localstack
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVICES: apigateway,lambda,sqs,sns,cloudwatch,logs,iam,sts
+      DEBUG: "1"
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+      ORDER_PROCESSING_QUEUE_NAME: ${ORDER_PROCESSING_QUEUE_NAME:-OrderProcessingQueue}
+      ORDER_PROCESSING_DLQ_NAME: ${ORDER_PROCESSING_DLQ_NAME:-OrderProcessingDLQ}
+      ORDER_STATUS_TOPIC_NAME: ${ORDER_STATUS_TOPIC_NAME:-OrderStatusNotifications}
+      ORDER_CREATOR_FUNCTION_NAME: ${ORDER_CREATOR_FUNCTION_NAME:-OrderCreator}
+      ORDER_PROCESSOR_FUNCTION_NAME: ${ORDER_PROCESSOR_FUNCTION_NAME:-OrderProcessor}
+      NOTIFICATION_SERVICE_FUNCTION_NAME: ${NOTIFICATION_SERVICE_FUNCTION_NAME:-NotificationService}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-orders_db}
+      DB_USER: ${DB_USER:-orders_user}
+      DB_PASSWORD: ${DB_PASSWORD:-orders_password}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROCESSING_FAILURE_RATE: ${PROCESSING_FAILURE_RATE:-0.2}
+    ports:
+      - "4566:4566"
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/workspace
+      - ./infrastructure/localstack-init:/etc/localstack/init/ready.d
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/rest_api_id && awslocal lambda get-function --function-name ${ORDER_CREATOR_FUNCTION_NAME:-OrderCreator} >/dev/null 2>&1 && awslocal apigateway get-rest-apis --query \"items[?name=='order-api'] | length(@)\" --output text | grep -q 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  order-creator-service:
+    build:
+      context: .
+      dockerfile: src/order_creator_lambda/Dockerfile
+    command: ["sh", "-c", "python -c 'import app' && sleep infinity"]
+    environment:
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ENDPOINT_URL: http://localstack:4566
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-orders_db}
+      DB_USER: ${DB_USER:-orders_user}
+      DB_PASSWORD: ${DB_PASSWORD:-orders_password}
+      ORDER_PROCESSING_QUEUE_NAME: ${ORDER_PROCESSING_QUEUE_NAME:-OrderProcessingQueue}
+    depends_on:
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import app"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    profiles: ["dev"]
+
+  order-processor-service:
+    build:
+      context: .
+      dockerfile: src/order_processor_lambda/Dockerfile
+    command: ["sh", "-c", "python -c 'import app' && sleep infinity"]
+    environment:
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ENDPOINT_URL: http://localstack:4566
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-orders_db}
+      DB_USER: ${DB_USER:-orders_user}
+      DB_PASSWORD: ${DB_PASSWORD:-orders_password}
+      ORDER_STATUS_TOPIC_NAME: ${ORDER_STATUS_TOPIC_NAME:-OrderStatusNotifications}
+    depends_on:
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import app"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    profiles: ["dev"]
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: src/notification_service_lambda/Dockerfile
+    command: ["sh", "-c", "python -c 'import app' && sleep infinity"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import app"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    profiles: ["dev"]
+
+  tests:
+    image: python:3.11-slim
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace
+    environment:
+      PYTHONPATH: /workspace/src
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-orders_db}
+      DB_USER: ${DB_USER:-orders_user}
+      DB_PASSWORD: ${DB_PASSWORD:-orders_password}
+      ORDER_STATUS_TOPIC_NAME: ${ORDER_STATUS_TOPIC_NAME:-OrderStatusNotifications}
+      ORDER_PROCESSING_QUEUE_NAME: ${ORDER_PROCESSING_QUEUE_NAME:-OrderProcessingQueue}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    command: ["sh", "-c", "pip install --no-cache-dir -r requirements.txt && pytest -q tests"]
+    profiles: ["test"]
+
+volumes:
+  postgres_data:
+  localstack_data:
